@@ -1,4 +1,6 @@
 import json
+import math
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -8,16 +10,52 @@ from nba_api.stats.endpoints import (
     leaguedashplayershotlocations,
     shotchartdetail,
 )
+from nba_api.stats.library.http import NBAStatsHTTP
 from nba_api.stats.static import teams as nba_teams
 from sklearn.metrics.pairwise import cosine_similarity
 
 CACHE_DIR = Path(__file__).parent / "data" / "cache"
+BASELINE_DIR = Path(__file__).parent / "data" / "baselines"
+
+NBAStatsHTTP.timeout = 90
+NBA_MAX_RETRIES = 4
+NBA_RETRY_DELAY = 2
 
 # NBA tracking coords (tenths of a foot). API fields are LOC_X / LOC_Y (= SHOT_X / SHOT_Y).
 COURT_X_MIN, COURT_X_MAX = -250, 250
 COURT_Y_MIN, COURT_Y_MAX = -50, 422
 DEFAULT_HEX_GRIDSIZE = 22
 DEFAULT_MIN_HEX_SHOTS = 5
+
+
+def _call_with_retry(fetch_fn, label: str):
+    """Retry NBA API calls — cloud requests often need longer timeouts."""
+    last_err = None
+    for attempt in range(NBA_MAX_RETRIES):
+        try:
+            return fetch_fn()
+        except Exception as err:
+            last_err = err
+            if attempt < NBA_MAX_RETRIES - 1:
+                time.sleep(NBA_RETRY_DELAY * (attempt + 1))
+    raise last_err
+
+
+def _zone_for_court_point(x_ft: float, y_ft: float) -> str:
+    """Approximate NBA SHOT_ZONE_BASIC from court coordinates (feet)."""
+    dist = math.hypot(x_ft, 47 - y_ft)
+    if y_ft < 0:
+        return "Backcourt"
+    if dist <= 4:
+        return "Restricted Area"
+    if abs(x_ft) <= 8 and y_ft <= 19:
+        return "In The Paint (Non-RA)"
+    if dist >= 23.75 and y_ft <= 14:
+        return "Left Corner 3" if x_ft < 0 else "Right Corner 3"
+    if dist >= 23.75:
+        return "Above the Break 3"
+    return "Mid-Range"
+
 
 def get_player_shot_vectors(season='2025-26'):
     """
@@ -27,10 +65,13 @@ def get_player_shot_vectors(season='2025-26'):
     print(f"Fetching shot location data for the {season} season...")
     
     # This specific endpoint breaks down shot attempts by zone across the whole league
-    raw_data = leaguedashplayershotlocations.LeagueDashPlayerShotLocations(
-        season=season,
-        distance_range='By Zone' # Crucial parameter to group spatial data
-    )
+    def _fetch():
+        return leaguedashplayershotlocations.LeagueDashPlayerShotLocations(
+            season=season,
+            distance_range='By Zone',
+        )
+
+    raw_data = _call_with_retry(_fetch, "league shot vectors")
     
     # The NBA API returns multi-index headers for this endpoint. Let's clean it.
     df = raw_data.get_data_frames()[0]
@@ -208,12 +249,15 @@ def get_active_players(season: str = "2024-25") -> pd.DataFrame:
     if cache_path.exists():
         return pd.DataFrame(json.loads(cache_path.read_text()))
 
-    endpoint = commonallplayers.CommonAllPlayers(
-        is_only_current_season=1,
-        league_id="00",
-        season=season,
-    )
-    players_df = endpoint.get_data_frames()[0]
+    def _fetch():
+        endpoint = commonallplayers.CommonAllPlayers(
+            is_only_current_season=1,
+            league_id="00",
+            season=season,
+        )
+        return endpoint.get_data_frames()[0]
+
+    players_df = _call_with_retry(_fetch, "active players")
     players_df = players_df[players_df["ROSTERSTATUS"] == 1].copy()
     players_df = players_df[["PERSON_ID", "DISPLAY_FIRST_LAST", "TEAM_ABBREVIATION"]]
     players_df.columns = ["PLAYER_ID", "PLAYER_NAME", "TEAM_ABBREVIATION"]
@@ -234,14 +278,17 @@ def fetch_player_shot_chart(player_id: int, season: str = "2024-25") -> pd.DataF
     if cache_path.exists():
         return pd.DataFrame(json.loads(cache_path.read_text()))
 
-    endpoint = shotchartdetail.ShotChartDetail(
-        player_id=player_id,
-        team_id=0,
-        season_nullable=season,
-        context_measure_simple="FGA",
-        league_id="00",
-    )
-    shots_df = endpoint.get_data_frames()[0]
+    def _fetch():
+        endpoint = shotchartdetail.ShotChartDetail(
+            player_id=player_id,
+            team_id=0,
+            season_nullable=season,
+            context_measure_simple="FGA",
+            league_id="00",
+        )
+        return endpoint.get_data_frames()[0]
+
+    shots_df = _call_with_retry(_fetch, f"player shots {player_id}")
     cache_path.write_text(shots_df.to_json(orient="records"))
     return shots_df
 
@@ -285,10 +332,13 @@ def get_league_shot_chart(season: str = "2024-25") -> pd.DataFrame:
 
 def get_league_zone_fg_pct(season: str = "2024-25") -> pd.DataFrame:
     """League-wide FG% by court zone from LeagueDashPlayerShotLocations."""
-    raw_data = leaguedashplayershotlocations.LeagueDashPlayerShotLocations(
-        season=season,
-        distance_range="By Zone",
-    )
+    def _fetch():
+        return leaguedashplayershotlocations.LeagueDashPlayerShotLocations(
+            season=season,
+            distance_range="By Zone",
+        )
+
+    raw_data = _call_with_retry(_fetch, "league zone fg")
     df = raw_data.get_data_frames()[0]
 
     clean_cols = []
@@ -377,13 +427,49 @@ def aggregate_hex_fg_stats(
     return grouped
 
 
+def _league_hex_from_zones(season: str, gridsize: int) -> pd.DataFrame:
+    """Lightweight league hex baseline from zone FG% (one API call)."""
+    import matplotlib.pyplot as plt
+
+    zone_fg = get_league_zone_fg_pct(season).set_index("zone")["fg_pct"].to_dict()
+    extent_ft = _court_extent_feet()
+
+    x_centers = np.linspace(extent_ft[0], extent_ft[1], gridsize * 2)
+    y_centers = np.linspace(extent_ft[2], extent_ft[3], gridsize)
+    xx, yy = np.meshgrid(x_centers, y_centers)
+    x_flat, y_flat = xx.ravel(), yy.ravel()
+
+    fig, ax = plt.subplots(figsize=(1, 1))
+    hb = ax.hexbin(x_flat, y_flat, gridsize=gridsize, extent=extent_ft, mincnt=1)
+    centers = hb.get_offsets()
+    plt.close(fig)
+
+    rows = []
+    for x_val, y_val in centers:
+        zone = _zone_for_court_point(float(x_val), float(y_val))
+        rows.append(
+            {
+                "hex_key": f"{round(x_val, 3)}_{round(y_val, 3)}",
+                "x": x_val,
+                "y": y_val,
+                "fga": 1,
+                "fgm": zone_fg.get(zone, 0.45),
+                "fg_pct": zone_fg.get(zone, 0.45),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def get_league_hex_baseline(
     season: str = "2024-25",
     gridsize: int = DEFAULT_HEX_GRIDSIZE,
 ) -> pd.DataFrame:
-    """Build league-average FG% for every hex cell (cached via team shot files)."""
-    league_shots = get_league_shot_chart(season)
-    return aggregate_hex_fg_stats(league_shots, gridsize=gridsize)
+    """Load precomputed league hex FG% or build from zone averages."""
+    bundled = BASELINE_DIR / f"league_hex_{season.replace('-', '_')}_gs{gridsize}.json"
+    if bundled.exists():
+        return pd.DataFrame(json.loads(bundled.read_text()))
+
+    return _league_hex_from_zones(season, gridsize)
 
 
 def compute_zone_efficiency_vs_league(

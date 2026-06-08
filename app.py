@@ -30,7 +30,7 @@ def load_active_players(season: str) -> pd.DataFrame:
     return get_active_players(season)
 
 
-@st.cache_data(ttl=3600, show_spinner="Loading…")
+@st.cache_data(ttl=3600, show_spinner="Loading shot data…")
 def load_player_shots(player_id: int, season: str) -> pd.DataFrame:
     return fetch_player_shot_chart(player_id, season)
 
@@ -46,11 +46,14 @@ def load_league_zones(season: str) -> pd.DataFrame:
 
 
 season = st.sidebar.selectbox("Season", SEASONS, index=1)
+view = st.sidebar.radio("View", ["Playstyle", "Shot chart"])
 
-tab_match, tab_chart = st.tabs(["Playstyle", "Shot chart"])
-
-with tab_match:
-    vector_df, fga_cols = load_player_vectors(season)
+if view == "Playstyle":
+    try:
+        vector_df, fga_cols = load_player_vectors(season)
+    except Exception as err:
+        st.error("Could not load player data. Try again in a moment.")
+        st.stop()
 
     match_options = sorted(vector_df["PLAYER_NAME"].unique().tolist())
     selected_match_player = st.selectbox(
@@ -82,11 +85,16 @@ with tab_match:
             },
         )
 
-with tab_chart:
+else:
     gridsize = st.sidebar.slider("Hex grid size", 16, 30, 22, key="hex_grid")
     min_hex_shots = st.sidebar.slider("Min FGA per hex", 3, 12, 5, key="min_hex")
 
-    active_df = load_active_players(season)
+    try:
+        active_df = load_active_players(season)
+    except Exception:
+        st.error("Could not load player list. Try again in a moment.")
+        st.stop()
+
     chart_options = sorted(active_df["PLAYER_NAME"].unique().tolist())
     selected_chart_player = st.selectbox(
         "Player",
@@ -99,9 +107,17 @@ with tab_chart:
 
     col_map, col_zones = st.columns([1.6, 1])
 
-    player_shots = load_player_shots(player_id, season)
-    league_hex = load_league_hex(season, gridsize)
-    league_zones = load_league_zones(season)
+    try:
+        with st.spinner("Loading shot chart…"):
+            player_shots = load_player_shots(player_id, season)
+            league_hex = load_league_hex(season, gridsize)
+            league_zones = load_league_zones(season)
+    except Exception:
+        st.error(
+            "Could not load shot data from the NBA API. "
+            "Wait a few seconds and refresh, or try another player/season."
+        )
+        st.stop()
 
     if player_shots.empty:
         st.warning("No shot data for this player and season.")
