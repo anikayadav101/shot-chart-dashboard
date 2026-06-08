@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Shot Analytics</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f0f1a;
+      color: #e8e8e8;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+    main {
+      max-width: 520px;
+      text-align: center;
+    }
+    h1 { font-size: 2rem; font-weight: 600; margin-bottom: 0.75rem; }
+    p { color: #aaa; line-height: 1.6; margin-bottom: 1.5rem; }
+    a.btn {
+      display: inline-block;
+      background: #ff4b4b;
+      color: #fff;
+      text-decoration: none;
+      padding: 0.75rem 1.5rem;
+      border-radius: 6px;
+      font-weight: 500;
+    }
+    a.btn:hover { background: #e04343; }
+    .note { font-size: 0.85rem; margin-top: 2rem; color: #666; }
+    code { background: #1a1a2e; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Shot Analytics</h1>
+    <p>
+      Compare NBA shot profiles and view efficiency maps by court zone.
+      Built with Streamlit and the NBA Stats API.
+    </p>
+    <a class="btn" id="app-link" href="https://share.streamlit.io">Open live app</a>
+    <p class="note">
+      After deploying on
+      <a href="https://share.streamlit.io" style="color:#888">Streamlit Cloud</a>,
+      update the button URL in <code>docs/index.html</code>.
+    </p>
+  </main>
+</body>
+</html>
